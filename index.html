@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Safe & Fun ChatHub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebaseの設定
+        // 注意: GitHubで自分のプロジェクトとして動かす場合は、__firebase_config の部分を
+        // 自分のFirebaseプロジェクトからコピーしたオブジェクトに置き換えてください。
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : {
+                apiKey: "YOUR_API_KEY",
+                authDomain: "YOUR_PROJECT.firebaseapp.com",
+                projectId: "YOUR_PROJECT_ID",
+                storageBucket: "YOUR_PROJECT.appspot.com",
+                messagingSenderId: "YOUR_SENDER_ID",
+                appId: "YOUR_APP_ID"
+            };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'my-github-chat';
+
+        // 状態管理
+        let currentUser = null;
+        let currentRoom = 'public';
+        let unsubscribeMessages = null;
+
+        // 要素の取得
+        const messageForm = document.getElementById('message-form');
+        const messageInput = document.getElementById('message-input');
+        const nameInput = document.getElementById('name-input');
+        const roomInput = document.getElementById('room-input');
+        const roomDisplay = document.getElementById('current-room-name');
+        const messagesList = document.getElementById('messages-list');
+        const loadingStatus = document.getElementById('loading-status');
+        const setRoomBtn = document.getElementById('set-room-btn');
+
+        // 認証処理
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+                showNotification("エラーが発生しました。ページを更新してください。");
+            }
+        }
+
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            if (user) {
+                loadingStatus.classList.add('hidden');
+                initBoard();
+            }
+        });
+
+        // ルーム入室処理
+        setRoomBtn.addEventListener('click', () => {
+            const key = roomInput.value.trim();
+            if (!key) {
+                currentRoom = 'public';
+                roomDisplay.textContent = '🏠 全体掲示板';
+                roomDisplay.className = 'text-xs font-bold text-indigo-500 uppercase tracking-widest';
+            } else {
+                currentRoom = key;
+                roomDisplay.textContent = `🔑 ルーム: ${key}`;
+                roomDisplay.className = 'text-xs font-bold text-emerald-500 uppercase tracking-widest';
+            }
+            initBoard();
+            showNotification(`${currentRoom === 'public' ? '全体掲示板' : '個室'}に移動しました`);
+        });
+
+        // データ購読
+        function initBoard() {
+            if (!currentUser) return;
+            if (unsubscribeMessages) unsubscribeMessages();
+
+            // 正しいパス構造を使用
+            const collectionPath = collection(db, 'artifacts', appId, 'public', 'data', 
+                currentRoom === 'public' ? 'messages' : `room_${currentRoom}`);
+
+            const q = query(collectionPath);
+            
+            unsubscribeMessages = onSnapshot(q, (snapshot) => {
+                const messages = [];
+                snapshot.forEach((doc) => {
+                    messages.push({ id: doc.id, ...doc.data() });
+                });
+                messages.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+                renderMessages(messages);
+            }, (error) => {
+                console.error("Firestore error:", error);
+                showNotification("データの取得に失敗しました。");
+            });
+        }
+
+        // メッセージ描画
+        function renderMessages(messages) {
+            messagesList.innerHTML = messages.map(msg => `
+                <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 mb-3 animate-in fade-in slide-in-from-bottom-2">
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="font-bold text-slate-700 text-sm">${escapeHtml(msg.userName || '名無しさん')}</span>
+                        <span class="text-[10px] text-slate-400">
+                            ${msg.createdAt ? new Date(msg.createdAt.seconds * 1000).toLocaleTimeString('ja-JP', {hour: '2-digit', minute:'2-digit'}) : '...'}
+                        </span>
+                    </div>
+                    <p class="text-slate-600 text-sm leading-relaxed">${escapeHtml(msg.text)}</p>
+                </div>
+            `).join('');
+            
+            if (messages.length === 0) {
+                messagesList.innerHTML = `
+                    <div class="text-center py-12">
+                        <p class="text-slate-300 text-sm">まだ誰も話していません。<br>最初の声をかけてみよう！</p>
+                    </div>`;
+            }
+        }
+
+        // 送信処理
+        messageForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!currentUser || messageInput.disabled) return;
+
+            const text = messageInput.value.trim();
+            const userName = nameInput.value.trim() || '名無しさん';
+
+            if (!text) return;
+
+            messageInput.disabled = true;
+            try {
+                const targetCollection = collection(db, 'artifacts', appId, 'public', 'data', 
+                    currentRoom === 'public' ? 'messages' : `room_${currentRoom}`);
+
+                await addDoc(targetCollection, {
+                    text: text,
+                    userName: userName,
+                    userId: currentUser.uid,
+                    createdAt: serverTimestamp()
+                });
+                messageInput.value = '';
+            } catch (error) {
+                console.error("Send error:", error);
+                showNotification("送信できませんでした。");
+            } finally {
+                messageInput.disabled = false;
+                messageInput.focus();
+            }
+        });
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function showNotification(message) {
+            const toast = document.createElement('div');
+            toast.className = 'bg-slate-800 text-white px-6 py-3 rounded-full fixed bottom-8 left-1/2 -translate-x-1/2 z-50 shadow-2xl text-xs font-bold transition-all duration-300 opacity-0 transform translate-y-4';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            
+            // アニメーション表示
+            setTimeout(() => {
+                toast.classList.remove('opacity-0', 'translate-y-4');
+            }, 10);
+
+            // 削除
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-4');
+                setTimeout(() => toast.remove(), 300);
+            }, 2500);
+        }
+
+        window.onload = initAuth;
+    </script>
+    <style>
+        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slide-in-from-bottom-2 { from { transform: translateY(0.5rem); } to { transform: translateY(0); } }
+        .animate-in { animation-duration: 0.4s; animation-fill-mode: forwards; }
+        .fade-in { animation-name: fade-in; }
+        .slide-in-from-bottom-2 { animation-name: slide-in-from-bottom-2; }
+        body { -webkit-tap-highlight-color: transparent; }
+    </style>
+</head>
+<body class="bg-[#F1F5F9] min-h-screen font-sans text-slate-900 selection:bg-indigo-100">
+
+    <div class="max-w-xl mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="mb-8 flex items-end justify-between px-2">
+            <div>
+                <h1 class="text-3xl font-black text-slate-800 tracking-tighter">ChatHub</h1>
+                <p id="current-room-name" class="text-xs font-bold text-indigo-500 uppercase tracking-widest transition-all">🏠 全体掲示板</p>
+            </div>
+            <div id="loading-status" class="mb-1">
+                <div class="animate-pulse flex space-x-1">
+                    <div class="h-1.5 w-1.5 bg-indigo-400 rounded-full"></div>
+                    <div class="h-1.5 w-1.5 bg-indigo-400 rounded-full shadow-[0_0_8px_rgba(129,140,248,0.8)]"></div>
+                    <div class="h-1.5 w-1.5 bg-indigo-400 rounded-full"></div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Room Selection (合言葉) -->
+        <div class="bg-white/70 backdrop-blur-md rounded-3xl shadow-sm border border-white p-2 mb-6 flex items-center gap-2">
+            <input type="password" id="room-input" placeholder="合言葉でルーム入室" 
+                class="flex-1 bg-transparent px-4 py-2 text-sm focus:outline-none placeholder:text-slate-300">
+            <button id="set-room-btn" class="bg-slate-900 text-white text-xs font-black px-5 py-2.5 rounded-2xl hover:bg-indigo-600 transition-all active:scale-95">
+                入室
+            </button>
+        </div>
+
+        <!-- Post Form -->
+        <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 mb-8">
+            <form id="message-form" class="space-y-4">
+                <div class="flex items-center gap-3">
+                    <div class="bg-indigo-50 p-2 rounded-xl">
+                        <svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>
+                    </div>
+                    <input type="text" id="name-input" placeholder="お名前（空欄で名無し）" maxlength="12"
+                        class="flex-1 bg-slate-50 border-none rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none">
+                </div>
+                
+                <textarea id="message-input" rows="3" placeholder="みんなにメッセージを送ろう！" required
+                    class="w-full bg-slate-50 border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none"></textarea>
+                
+                <button type="submit" 
+                    class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-black py-4 rounded-2xl transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2 group">
+                    <span>送信する</span>
+                    <svg class="w-4 h-4 transform group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                </button>
+            </form>
+        </div>
+
+        <!-- Messages List -->
+        <div id="messages-list" class="space-y-3 pb-20">
+            <!-- Messages will be here -->
+        </div>
+    </div>
+
+</body>
+</html>
