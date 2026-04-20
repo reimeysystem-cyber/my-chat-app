@@ -11,9 +11,9 @@
         import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp, deleteDoc, doc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // ==========================================
-        // 管理者用設定（自分だけで決めてね！）
+        // 管理者用設定
         // ==========================================
-        const ADMIN_PASSWORD = "S_23sd2w"; // ここを好きなパスワードに変更してください
+        const ADMIN_PASSWORD = "reimei_secret_admin"; 
         
         let db, auth, currentUser;
         let currentRoom = 'public';
@@ -34,7 +34,6 @@
         const loadingOverlay = document.getElementById('loading-overlay');
         const adminOverlay = document.getElementById('admin-overlay');
 
-        // 設定の読み込み
         function loadConfig() {
             const savedConfig = localStorage.getItem('fb_config_secure');
             if (savedConfig) {
@@ -104,7 +103,7 @@
                 snapshot.forEach(doc => messages.push({ id: doc.id, ...doc.data() }));
                 messages.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
                 renderMessages(messages);
-            }, (error) => console.error(error));
+            }, (error) => console.error("Firebase Error:", error));
         }
 
         function renderMessages(messages) {
@@ -113,7 +112,7 @@
                     <div class="flex justify-between items-center mb-1">
                         <div class="flex items-center gap-2">
                             <span class="font-bold text-slate-700 text-sm">${escapeHtml(msg.userName || '名無しさん')}</span>
-                            ${isAdmin ? `<button onclick="window.deleteMessage('${msg.id}')" class="text-[10px] bg-red-50 text-red-400 px-2 py-0.5 rounded hover:bg-red-500 hover:text-white transition-all">削除</button>` : ''}
+                            ${isAdmin ? `<button onclick="window.deleteMessage('${msg.id}')" class="text-[10px] bg-red-50 text-red-400 px-2 py-1 rounded-lg border border-red-100 hover:bg-red-500 hover:text-white transition-all font-bold">削除</button>` : ''}
                         </div>
                         <span class="text-[10px] text-slate-400 font-medium">${msg.createdAt ? new Date(msg.createdAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '送信中'}</span>
                     </div>
@@ -125,31 +124,36 @@
             }
         }
 
-        // 管理者用削除機能
+        // グローバル関数として登録
         window.deleteMessage = async (msgId) => {
-            if (!isAdmin) return;
+            if (!isAdmin) {
+                alert("管理者としてログインしてください。");
+                return;
+            }
             if (!confirm("このメッセージを削除しますか？")) return;
+            
             try {
                 const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
-                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', colName, msgId));
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', colName, msgId);
+                await deleteDoc(docRef);
             } catch (err) {
-                alert("削除に失敗しました。権限がありません。");
+                console.error("Delete failed:", err);
+                alert("削除に失敗しました。Firebaseのセキュリティルール（削除権限）を確認してください。");
             }
         };
 
-        // 管理者全削除機能
         window.clearAllMessages = async () => {
             if (!isAdmin) return;
-            if (!confirm("現在のルームのすべてのメッセージを消去しますか？この操作は戻せません。")) return;
+            if (!confirm("現在のルームの全メッセージを消去しますか？")) return;
             try {
                 const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
                 const q = query(collection(db, 'artifacts', appId, 'public', 'data', colName));
                 const snapshot = await getDocs(q);
                 const deletePromises = snapshot.docs.map(d => deleteDoc(d.ref));
                 await Promise.all(deletePromises);
-                alert("ルームを清掃しました。");
+                alert("清掃完了しました。");
             } catch (err) {
-                alert("エラーが発生しました。");
+                alert("全削除に失敗しました。");
             }
         };
 
@@ -180,7 +184,6 @@
             initBoard();
         });
 
-        // Admin Auth
         document.getElementById('admin-login-btn').addEventListener('click', () => {
             adminOverlay.classList.remove('hidden');
         });
@@ -195,8 +198,8 @@
                 adminOverlay.classList.add('hidden');
                 document.getElementById('admin-badge').classList.remove('hidden');
                 document.getElementById('admin-controls').classList.remove('hidden');
-                initBoard();
-                alert("管理者として認証されました。");
+                initBoard(); // ボタンを表示するために再描画
+                alert("ReimeiSystems 管理者認証成功");
             } else {
                 alert("パスワードが違います。");
             }
@@ -220,11 +223,9 @@
 </head>
 <body class="bg-slate-50 min-h-screen font-sans antialiased text-slate-900">
 
-    <!-- 設定画面 -->
     <div id="setup-overlay" class="fixed inset-0 bg-slate-900/90 z-[60] flex items-center justify-center p-4 hidden">
         <div class="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl overflow-y-auto max-h-[90vh]">
             <h2 class="text-2xl font-black mb-2 text-slate-800 tracking-tight">Firebase Setup</h2>
-            <p class="text-xs text-slate-500 mb-6 leading-relaxed">GitHubでの公開を安全にするため、API情報をコードに含めていません。</p>
             <form id="setup-form" class="space-y-4">
                 <div class="space-y-1"><label class="text-[10px] font-black text-slate-400 uppercase">API Key</label><input id="api-key" required class="w-full px-4 py-2 bg-slate-100 rounded-xl text-sm outline-none"></div>
                 <div class="grid grid-cols-2 gap-3">
@@ -242,21 +243,22 @@
         </div>
     </div>
 
-    <!-- Admin Login Overlay -->
-    <div id="admin-overlay" class="fixed inset-0 bg-indigo-900/95 z-[80] flex items-center justify-center p-4 hidden">
-        <div class="bg-white rounded-3xl p-8 max-w-sm w-full shadow-2xl text-center">
-            <h2 class="text-xl font-black mb-4 text-slate-800">Administrator Login</h2>
+    <div id="admin-overlay" class="fixed inset-0 bg-slate-900/95 z-[80] flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-3xl p-8 max-w-sm w-full shadow-2xl text-center border-t-4 border-red-500">
+            <div class="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg class="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+            </div>
+            <h2 class="text-xl font-black mb-4 text-slate-800 uppercase tracking-tight">Admin Login</h2>
             <form id="admin-auth-form" class="space-y-4">
-                <input type="password" id="admin-pass-input" placeholder="Admin Password" class="w-full px-4 py-3 bg-slate-100 rounded-xl text-center outline-none focus:ring-2 focus:ring-indigo-500">
+                <input type="password" id="admin-pass-input" placeholder="Password" class="w-full px-4 py-3 bg-slate-100 rounded-xl text-center outline-none focus:ring-2 focus:ring-red-500">
                 <div class="flex gap-2">
-                    <button type="button" id="close-admin-btn" class="flex-1 bg-slate-200 text-slate-600 font-bold py-3 rounded-xl transition-all">キャンセル</button>
-                    <button type="submit" class="flex-1 bg-indigo-600 text-white font-bold py-3 rounded-xl transition-all">ログイン</button>
+                    <button type="button" id="close-admin-btn" class="flex-1 bg-slate-200 text-slate-600 font-bold py-3 rounded-xl">Back</button>
+                    <button type="submit" class="flex-1 bg-red-600 text-white font-bold py-3 rounded-xl">Login</button>
                 </div>
             </form>
         </div>
     </div>
 
-    <!-- ローディング -->
     <div id="loading-overlay" class="fixed inset-0 bg-slate-50 z-[70] flex items-center justify-center">
         <div class="flex flex-col items-center gap-4">
             <div class="animate-spin h-10 w-10 border-4 border-indigo-500 border-t-transparent rounded-full"></div>
@@ -264,14 +266,13 @@
         </div>
     </div>
 
-    <!-- メインコンテンツ -->
     <div id="main-content" class="max-w-xl mx-auto px-4 py-12 opacity-0 pointer-events-none transition-opacity duration-700">
         <header class="mb-8 flex items-center justify-between px-2">
             <div>
                 <div class="flex items-center gap-3 mb-1">
                     <h1 class="text-4xl font-black text-slate-900 tracking-tighter">ChatHub</h1>
                     <span class="bg-indigo-50 text-indigo-500 text-[10px] font-black px-2 py-0.5 rounded-md border border-indigo-100">ReimeiSystems</span>
-                    <span id="admin-badge" class="bg-red-500 text-white text-[10px] font-black px-2 py-0.5 rounded-md hidden uppercase tracking-widest">Admin</span>
+                    <span id="admin-badge" class="bg-red-600 text-white text-[10px] font-black px-2 py-0.5 rounded-md hidden uppercase tracking-widest">Admin</span>
                 </div>
                 <div class="flex items-center gap-2">
                     <span class="relative flex h-2 w-2">
@@ -284,20 +285,17 @@
             <button onclick="if(confirm('設定をリセットしますか？')) { localStorage.removeItem('fb_config_secure'); location.reload(); }" class="text-[10px] font-bold text-slate-300 hover:text-red-400 transition-colors py-2 px-3 rounded-lg border border-slate-200 uppercase tracking-tighter">Reset</button>
         </header>
 
-        <!-- 管理者コントロール -->
-        <div id="admin-controls" class="hidden mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl animate-in fade-in slide-in-from-bottom-2">
-            <h3 class="text-xs font-black text-red-600 uppercase mb-2">Admin Tools</h3>
-            <button onclick="window.clearAllMessages()" class="w-full bg-red-600 text-white text-[10px] font-black py-2 rounded-xl hover:bg-red-700 transition-all uppercase tracking-widest">ルームの全メッセージを削除</button>
+        <div id="admin-controls" class="hidden mb-6 p-5 bg-red-50 border border-red-200 rounded-3xl animate-in fade-in slide-in-from-bottom-2">
+            <h3 class="text-[10px] font-black text-red-600 uppercase mb-3 tracking-widest">Admin Control Panel</h3>
+            <button onclick="window.clearAllMessages()" class="w-full bg-white border-2 border-red-200 text-red-600 text-[10px] font-black py-3 rounded-2xl hover:bg-red-600 hover:text-white transition-all uppercase tracking-widest shadow-sm">ルーム内の全メッセージを一掃</button>
         </div>
 
-        <!-- ルーム切り替え -->
         <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-2 mb-8 flex items-center gap-2 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
             <div class="pl-4 py-2"><svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg></div>
             <input type="password" id="room-input" placeholder="合言葉で個室に入室" class="flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-slate-300">
             <button id="set-room-btn" class="bg-slate-900 text-white text-[10px] font-black px-6 py-3 rounded-2xl hover:bg-indigo-600 active:scale-95 transition-all uppercase tracking-widest">入室</button>
         </div>
 
-        <!-- 投稿エリア -->
         <div class="bg-white rounded-[2rem] shadow-sm border border-slate-200 p-6 mb-10 relative">
             <form id="message-form" class="space-y-4">
                 <div class="flex items-center gap-3 bg-slate-50 border border-slate-100 rounded-xl px-4 py-2 transition-all">
@@ -311,12 +309,10 @@
             </form>
         </div>
 
-        <!-- メッセージリスト -->
         <div id="messages-list" class="space-y-4 pb-12"></div>
 
-        <!-- フッター -->
         <footer class="mt-12 mb-20 text-center space-y-4">
-            <button id="admin-login-btn" class="text-[8px] font-bold text-slate-300 hover:text-indigo-400 uppercase tracking-widest">Admin Settings</button>
+            <button id="admin-login-btn" class="text-[10px] font-bold text-slate-300 hover:text-red-500 uppercase tracking-widest transition-colors py-2 px-4 border border-slate-100 rounded-xl">Admin Settings</button>
             <p class="text-[10px] font-black text-slate-300 uppercase tracking-[0.3em] block">Powered by ReimeiSystems</p>
         </footer>
     </div>
