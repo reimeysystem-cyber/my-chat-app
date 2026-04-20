@@ -3,56 +3,43 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ChatHub | ReimeiSystems Admin</title>
+    <title>ChatHub | ReimeiSystems Premium</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=Noto+Sans+JP:wght@400;700;900&display=swap');
+        body { font-family: 'Inter', 'Noto Sans JP', sans-serif; }
+        .message-in { animation: slideUp 0.4s ease-out forwards; }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .bg-glass { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); }
+    </style>
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp, deleteDoc, doc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp, deleteDoc, doc, getDocs, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // ==========================================
-        // 管理者用設定
+        // 1. 基本設定
         // ==========================================
         const ADMIN_PASSWORD = "reimei_secret_admin"; 
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'my-github-chat-v2';
         
         let db, auth, currentUser;
         let currentRoom = 'public';
-        let unsubscribeMessages = null;
         let isAdmin = false;
-        const appId = 'my-github-chat-v2';
+        let warnedUsers = new Set();
+        let allMessages = [];
+        let unsub = { msg: null, ann: null, warn: null };
 
-        // UI要素の取得
+        // UI要素
         const setupOverlay = document.getElementById('setup-overlay');
-        const setupForm = document.getElementById('setup-form');
         const mainContent = document.getElementById('main-content');
-        const messageForm = document.getElementById('message-form');
-        const messageInput = document.getElementById('message-input');
-        const nameInput = document.getElementById('name-input');
-        const roomInput = document.getElementById('room-input');
-        const roomDisplay = document.getElementById('current-room-name');
-        const messagesList = document.getElementById('messages-list');
         const loadingOverlay = document.getElementById('loading-overlay');
-        const adminOverlay = document.getElementById('admin-overlay');
+        const messagesList = document.getElementById('messages-list');
+        const announceList = document.getElementById('announce-list');
 
-        function loadConfig() {
-            const savedConfig = localStorage.getItem('fb_config_secure');
-            if (savedConfig) {
-                try {
-                    initFirebase(JSON.parse(savedConfig));
-                } catch (e) {
-                    localStorage.removeItem('fb_config_secure');
-                    showSetup();
-                }
-            } else {
-                showSetup();
-            }
-        }
-
-        function showSetup() {
-            setupOverlay.classList.remove('hidden');
-            loadingOverlay.classList.add('hidden');
-        }
-
+        // ==========================================
+        // 2. Firebase 初期化
+        // ==========================================
         async function initFirebase(config) {
             try {
                 const app = initializeApp(config);
@@ -63,154 +50,149 @@
                     if (user) {
                         currentUser = user;
                         setupOverlay.classList.add('hidden');
-                        mainContent.classList.remove('opacity-0', 'pointer-events-none');
                         loadingOverlay.classList.add('hidden');
-                        initBoard();
+                        mainContent.classList.replace('opacity-0', 'opacity-100');
+                        startGlobalListeners();
+                        loadBoard();
                     } else {
-                        await signInAnonymously(auth);
+                        // 認証トークンのチェック
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
                     }
                 });
-            } catch (error) {
-                console.error("Initialization error:", error);
+            } catch (err) {
+                console.error("Firebase Init Error:", err);
                 localStorage.removeItem('fb_config_secure');
                 location.reload();
             }
         }
 
-        setupForm.addEventListener('submit', (e) => {
-            e.preventDefault();
-            const config = {
-                apiKey: document.getElementById('api-key').value.trim(),
-                authDomain: document.getElementById('auth-domain').value.trim(),
-                projectId: document.getElementById('project-id').value.trim(),
-                storageBucket: document.getElementById('storage-bucket').value.trim(),
-                messagingSenderId: document.getElementById('sender-id').value.trim(),
-                appId: document.getElementById('app-id-fb').value.trim()
-            };
-            localStorage.setItem('fb_config_secure', JSON.stringify(config));
-            loadingOverlay.classList.remove('hidden');
-            initFirebase(config);
-        });
+        // ==========================================
+        // 3. リアルタイム監視 (Listeners)
+        // ==========================================
+        function startGlobalListeners() {
+            if (unsub.ann) unsub.ann();
+            if (unsub.warn) unsub.warn();
 
-        function initBoard() {
-            if (!currentUser || !db) return;
-            if (unsubscribeMessages) unsubscribeMessages();
+            // お知らせの監視
+            const qAnn = query(collection(db, 'artifacts', appId, 'public', 'data', 'announcements'));
+            unsub.ann = onSnapshot(qAnn, (snap) => {
+                const html = [];
+                snap.forEach(d => {
+                    const data = d.data();
+                    html.push(`
+                        <div class="bg-gradient-to-r from-indigo-600 to-violet-600 text-white p-5 rounded-3xl shadow-xl mb-6 relative overflow-hidden group">
+                            <div class="absolute -right-4 -top-4 opacity-10 group-hover:scale-110 transition-transform">
+                                <svg class="w-24 h-24" fill="currentColor" viewBox="0 0 20 20"><path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z"></path></svg>
+                            </div>
+                            <div class="flex items-center gap-2 mb-2">
+                                <span class="bg-white/20 backdrop-blur-sm text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest">Notice</span>
+                                <span class="text-[10px] opacity-60">${data.createdAt ? new Date(data.createdAt.seconds * 1000).toLocaleDateString() : ''}</span>
+                            </div>
+                            <p class="text-sm font-bold leading-relaxed relative z-10">${escapeHtml(data.text)}</p>
+                            ${isAdmin ? `<button onclick="window.deleteAnnounce('${d.id}')" class="absolute top-4 right-4 text-white/50 hover:text-white transition-colors">✕</button>` : ''}
+                        </div>
+                    `);
+                });
+                announceList.innerHTML = html.join('');
+            }, (err) => console.error("Announce Sync Error:", err));
 
-            const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
-            const q = query(collection(db, 'artifacts', appId, 'public', 'data', colName));
-            
-            unsubscribeMessages = onSnapshot(q, (snapshot) => {
-                const messages = [];
-                snapshot.forEach(doc => messages.push({ id: doc.id, ...doc.data() }));
-                messages.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
-                renderMessages(messages);
-            }, (error) => {
-                console.error("Firestore Listen Error:", error);
+            // 警告リストの監視
+            const qWarn = query(collection(db, 'artifacts', appId, 'public', 'data', 'warned_users'));
+            unsub.warn = onSnapshot(qWarn, (snap) => {
+                warnedUsers = new Set();
+                snap.forEach(d => warnedUsers.add(d.id));
+                renderMessages();
             });
         }
 
-        function renderMessages(messages) {
-            messagesList.innerHTML = messages.map(msg => `
-                <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 mb-3 animate-in fade-in slide-in-from-bottom-2">
-                    <div class="flex justify-between items-center mb-1">
-                        <div class="flex items-center gap-2">
-                            <span class="font-bold text-slate-700 text-sm">${escapeHtml(msg.userName || '名無しさん')}</span>
-                            ${isAdmin ? `<button onclick="window.deleteMessage('${msg.id}')" class="text-[10px] bg-red-50 text-red-500 px-2 py-1 rounded-lg border border-red-100 hover:bg-red-600 hover:text-white transition-all font-bold">削除</button>` : ''}
-                        </div>
-                        <span class="text-[10px] text-slate-400 font-medium">${msg.createdAt ? new Date(msg.createdAt.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '送信中'}</span>
-                    </div>
-                    <p class="text-slate-600 text-sm leading-relaxed">${escapeHtml(msg.text)}</p>
-                </div>
-            `).join('');
-            if (messages.length === 0) {
-                messagesList.innerHTML = `<div class="text-center py-20"><p class="text-slate-300 text-sm italic">まだメッセージがありません</p></div>`;
-            }
+        function loadBoard() {
+            if (unsub.msg) unsub.msg();
+            const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
+            const q = query(collection(db, 'artifacts', appId, 'public', 'data', colName));
+            
+            unsub.msg = onSnapshot(q, (snap) => {
+                allMessages = [];
+                snap.forEach(d => allMessages.push({ id: d.id, ...d.data() }));
+                allMessages.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+                renderMessages();
+            });
         }
 
-        // 管理者用削除機能
-        window.deleteMessage = async (msgId) => {
-            if (!isAdmin) {
-                alert("管理者権限が必要です。");
+        // ==========================================
+        // 4. 表示描画 (Render)
+        // ==========================================
+        function renderMessages() {
+            if (allMessages.length === 0) {
+                messagesList.innerHTML = `<div class="text-center py-20 opacity-30 italic text-sm">メッセージはまだありません</div>`;
                 return;
             }
-            if (!confirm("このメッセージを削除しますか？")) return;
-            
-            try {
-                const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', colName, msgId);
-                await deleteDoc(docRef);
-                console.log("Message deleted successfully");
-            } catch (err) {
-                console.error("Delete failed:", err);
-                alert("削除できませんでした。Firebaseルールの 'allow delete' が許可されているか確認してください。");
-            }
+
+            messagesList.innerHTML = allMessages.map(msg => {
+                const isWarned = warnedUsers.has(msg.userId);
+                return `
+                <div class="message-in bg-white p-5 rounded-[2rem] shadow-sm border ${isWarned ? 'border-amber-300 bg-amber-50/20' : 'border-slate-100'} mb-4 transition-all">
+                    <div class="flex justify-between items-start mb-2">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="font-black text-slate-800 text-sm">${escapeHtml(msg.userName || '名無しさん')}</span>
+                            ${isWarned ? `<span class="bg-amber-100 text-amber-600 text-[9px] font-black px-2 py-0.5 rounded-full border border-amber-200">⚠️ 警告あり</span>` : ''}
+                            <span class="text-[9px] font-mono text-slate-300">ID:${msg.userId ? msg.userId.substring(0,6) : '????'}</span>
+                        </div>
+                        <span class="text-[10px] font-medium text-slate-400">${msg.createdAt ? new Date(msg.createdAt.seconds * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '...'}</span>
+                    </div>
+                    <p class="text-slate-600 text-sm leading-relaxed break-words">${escapeHtml(msg.text)}</p>
+                    
+                    ${isAdmin ? `
+                        <div class="mt-4 pt-3 border-t border-slate-50 flex gap-3">
+                            <button onclick="window.deleteMessage('${msg.id}')" class="text-[10px] font-bold text-red-400 hover:text-red-600 transition-colors uppercase">Delete</button>
+                            <button onclick="window.toggleWarn('${msg.userId}', ${!isWarned})" class="text-[10px] font-bold text-amber-500 hover:text-amber-700 transition-colors uppercase">${isWarned ? 'Unwarn' : 'Warn User'}</button>
+                        </div>
+                    ` : ''}
+                </div>
+                `;
+            }).join('');
+        }
+
+        // ==========================================
+        // 5. アクション関数 (Global functions)
+        // ==========================================
+        window.deleteMessage = async (id) => {
+            if (!isAdmin || !confirm("メッセージを消去しますか？")) return;
+            const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
+            await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', colName, id));
         };
 
-        // 全メッセージ消去
-        window.clearAllMessages = async () => {
+        window.toggleWarn = async (uid, shouldWarn) => {
             if (!isAdmin) return;
-            if (!confirm("このルームの全メッセージを消去します。よろしいですか？")) return;
-            try {
-                const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
-                const q = query(collection(db, 'artifacts', appId, 'public', 'data', colName));
-                const snapshot = await getDocs(q);
-                const deletePromises = snapshot.docs.map(d => deleteDoc(d.ref));
-                await Promise.all(deletePromises);
-                alert("ルームを清掃しました。");
-            } catch (err) {
-                console.error("Clear all failed:", err);
-                alert("消去に失敗しました。");
-            }
+            const ref = doc(db, 'artifacts', appId, 'public', 'data', 'warned_users', uid);
+            shouldWarn ? await setDoc(ref, { warned: true, timestamp: serverTimestamp() }) : await deleteDoc(ref);
         };
 
-        messageForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const text = messageInput.value.trim();
-            if (!text || !currentUser) return;
+        window.postAnnounce = async () => {
+            const input = document.getElementById('announce-input');
+            if (!isAdmin || !input.value.trim()) return;
+            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'announcements'), {
+                text: input.value.trim(),
+                createdAt: serverTimestamp()
+            });
+            input.value = '';
+        };
 
-            messageInput.disabled = true;
-            try {
-                const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
-                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', colName), {
-                    text,
-                    userName: nameInput.value.trim() || '名無しさん',
-                    userId: currentUser.uid,
-                    createdAt: serverTimestamp()
-                });
-                messageInput.value = '';
-                messageInput.focus();
-            } finally {
-                messageInput.disabled = false;
-            }
-        });
+        window.deleteAnnounce = async (id) => {
+            if (!isAdmin) return;
+            await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'announcements', id));
+        };
 
-        document.getElementById('set-room-btn').addEventListener('click', () => {
-            currentRoom = roomInput.value.trim() || 'public';
-            roomDisplay.textContent = currentRoom === 'public' ? '🏠 全体掲示板' : `🔑 ルーム: ${currentRoom}`;
-            initBoard();
-        });
-
-        // 管理者認証
-        document.getElementById('admin-login-btn').addEventListener('click', () => {
-            adminOverlay.classList.remove('hidden');
-        });
-        document.getElementById('close-admin-btn').addEventListener('click', () => {
-            adminOverlay.classList.add('hidden');
-        });
-        document.getElementById('admin-auth-form').addEventListener('submit', (e) => {
-            e.preventDefault();
-            const pass = document.getElementById('admin-pass-input').value;
-            if (pass === ADMIN_PASSWORD) {
-                isAdmin = true;
-                adminOverlay.classList.add('hidden');
-                document.getElementById('admin-badge').classList.remove('hidden');
-                document.getElementById('admin-controls').classList.remove('hidden');
-                initBoard(); 
-                alert("ReimeiSystems 管理者権限を有効化しました");
-            } else {
-                alert("パスワードが正しくありません。");
-            }
-        });
+        window.switchRoom = () => {
+            const pass = document.getElementById('room-pass').value.trim();
+            currentRoom = pass || 'public';
+            document.getElementById('room-label').textContent = currentRoom === 'public' ? '🏠 全体掲示板' : `🔑 ルーム: ${currentRoom}`;
+            loadBoard();
+            alert(`ルーム [${currentRoom}] に切り替えました`);
+        };
 
         function escapeHtml(str) {
             const div = document.createElement('div');
@@ -218,128 +200,166 @@
             return div.innerHTML;
         }
 
-        window.onload = loadConfig;
+        // ==========================================
+        // 6. イベント処理
+        // ==========================================
+        window.onload = () => {
+            const saved = localStorage.getItem('fb_config_secure');
+            if (saved) initFirebase(JSON.parse(saved));
+            else {
+                setupOverlay.classList.remove('hidden');
+                loadingOverlay.classList.add('hidden');
+            }
+        };
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Firebase設定保存
+            document.getElementById('setup-form').addEventListener('submit', (e) => {
+                e.preventDefault();
+                const config = {
+                    apiKey: document.getElementById('api-key').value,
+                    authDomain: document.getElementById('auth-domain').value,
+                    projectId: document.getElementById('project-id').value,
+                    storageBucket: document.getElementById('storage-bucket').value,
+                    messagingSenderId: document.getElementById('sender-id').value,
+                    appId: document.getElementById('app-id-fb').value
+                };
+                localStorage.setItem('fb_config_secure', JSON.stringify(config));
+                loadingOverlay.classList.remove('hidden');
+                initFirebase(config);
+            });
+
+            // メッセージ送信
+            document.getElementById('message-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const input = document.getElementById('message-input');
+                const btn = e.target.querySelector('button');
+                if (!input.value.trim()) return;
+
+                btn.disabled = true;
+                btn.opacity = 0.5;
+                try {
+                    const colName = currentRoom === 'public' ? 'messages' : `room_${currentRoom}`;
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', colName), {
+                        text: input.value,
+                        userName: document.getElementById('name-input').value || '名無しさん',
+                        userId: currentUser.uid,
+                        createdAt: serverTimestamp()
+                    });
+                    input.value = '';
+                } finally {
+                    btn.disabled = false;
+                    btn.opacity = 1;
+                }
+            });
+
+            // 管理者ログイン
+            document.getElementById('admin-trigger').addEventListener('click', () => {
+                const p = prompt("管理者パスワードを入力してください");
+                if (p === ADMIN_PASSWORD) {
+                    isAdmin = true;
+                    document.querySelectorAll('.admin-only').forEach(el => el.classList.remove('hidden'));
+                    renderMessages();
+                    startGlobalListeners();
+                    alert("管理者モードが有効になりました。");
+                }
+            });
+        });
     </script>
-    <style>
-        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes slide-in-from-bottom-2 { from { transform: translateY(0.5rem); } to { transform: translateY(0); } }
-        .animate-in { animation-duration: 0.4s; animation-fill-mode: forwards; }
-        .fade-in { animation-name: fade-in; }
-        .slide-in-from-bottom-2 { animation-name: slide-in-from-bottom-2; }
-    </style>
 </head>
-<body class="bg-slate-50 min-h-screen font-sans antialiased text-slate-900">
+<body class="bg-[#F8FAFC] min-h-screen text-slate-900 selection:bg-indigo-100">
 
-    <!-- Firebase設定オーバーレイ -->
-    <div id="setup-overlay" class="fixed inset-0 bg-slate-900/90 z-[60] flex items-center justify-center p-4 hidden">
-        <div class="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl overflow-y-auto max-h-[90vh]">
-            <h2 class="text-2xl font-black mb-2 text-slate-800 tracking-tight">Firebase Setup</h2>
-            <form id="setup-form" class="space-y-4">
-                <div class="space-y-1"><label class="text-[10px] font-black text-slate-400 uppercase">API Key</label><input id="api-key" required class="w-full px-4 py-2 bg-slate-100 rounded-xl text-sm outline-none"></div>
-                <div class="grid grid-cols-2 gap-3">
-                    <div class="space-y-1"><label class="text-[10px] font-black text-slate-400 uppercase">Project ID</label><input id="project-id" required class="w-full px-4 py-2 bg-slate-100 rounded-xl text-sm outline-none"></div>
-                    <div class="space-y-1"><label class="text-[10px] font-black text-slate-400 uppercase">Auth Domain</label><input id="auth-domain" required class="w-full px-4 py-2 bg-slate-100 rounded-xl text-sm outline-none"></div>
-                </div>
-                <div class="space-y-1"><label class="text-[10px] font-black text-slate-400 uppercase">Storage Bucket</label><input id="storage-bucket" required class="w-full px-4 py-2 bg-slate-100 rounded-xl text-sm outline-none"></div>
-                <div class="grid grid-cols-2 gap-3">
-                    <div class="space-y-1"><label class="text-[10px] font-black text-slate-400 uppercase">Sender ID</label><input id="sender-id" required class="w-full px-4 py-2 bg-slate-100 rounded-xl text-sm outline-none"></div>
-                    <div class="space-y-1"><label class="text-[10px] font-black text-slate-400 uppercase">App ID</label><input id="app-id-fb" required class="w-full px-4 py-2 bg-slate-100 rounded-xl text-sm outline-none"></div>
-                </div>
-                <button type="submit" class="w-full bg-indigo-600 text-white font-black py-4 rounded-2xl mt-4 shadow-lg active:scale-95 transition-all">保存して開始</button>
-            </form>
-            <div class="mt-6 text-center"><p class="text-[10px] font-bold text-slate-300 uppercase tracking-widest">ReimeiSystems Project</p></div>
-        </div>
-    </div>
-
-    <!-- 管理者ログインオーバーレイ -->
-    <div id="admin-overlay" class="fixed inset-0 bg-slate-900/95 z-[80] flex items-center justify-center p-4 hidden">
-        <div class="bg-white rounded-3xl p-8 max-w-sm w-full shadow-2xl text-center border-t-4 border-red-500">
-            <div class="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4 text-red-500">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+    <!-- 設定画面 -->
+    <div id="setup-overlay" class="fixed inset-0 bg-slate-900/95 z-[100] flex items-center justify-center p-6 hidden">
+        <div class="bg-white rounded-[3rem] p-10 w-full max-w-md shadow-2xl">
+            <div class="mb-8">
+                <h2 class="text-3xl font-black tracking-tighter mb-2 text-slate-800 text-center">Firebase Setup</h2>
+                <p class="text-slate-400 text-xs font-bold text-center uppercase tracking-widest">Connect to your system</p>
             </div>
-            <h2 class="text-xl font-black mb-4 text-slate-800 uppercase tracking-tight">Admin Authentication</h2>
-            <form id="admin-auth-form" class="space-y-4">
-                <input type="password" id="admin-pass-input" placeholder="パスワードを入力" class="w-full px-4 py-3 bg-slate-100 rounded-xl text-center outline-none focus:ring-2 focus:ring-red-500">
-                <div class="flex gap-2">
-                    <button type="button" id="close-admin-btn" class="flex-1 bg-slate-100 text-slate-500 font-bold py-3 rounded-xl hover:bg-slate-200 transition-all">戻る</button>
-                    <button type="submit" class="flex-1 bg-red-600 text-white font-bold py-3 rounded-xl hover:bg-red-700 shadow-lg shadow-red-100 transition-all">認証</button>
+            <form id="setup-form" class="space-y-3">
+                <div class="grid grid-cols-1 gap-3">
+                    <input id="api-key" placeholder="API Key" required class="w-full px-5 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-50 outline-none transition-all">
+                    <div class="flex gap-3">
+                        <input id="project-id" placeholder="Project ID" required class="flex-1 px-5 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm outline-none">
+                        <input id="app-id-fb" placeholder="App ID" required class="flex-1 px-5 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm outline-none">
+                    </div>
+                    <input id="auth-domain" placeholder="Auth Domain" required class="w-full px-5 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm outline-none">
+                    <input id="storage-bucket" placeholder="Storage Bucket" class="w-full px-5 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm outline-none">
+                    <input id="sender-id" placeholder="Sender ID" class="w-full px-5 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-sm outline-none">
                 </div>
+                <button type="submit" class="w-full bg-slate-900 text-white font-black py-5 rounded-[2rem] shadow-xl hover:bg-indigo-600 active:scale-95 transition-all mt-4 text-sm uppercase tracking-widest">保存して開始</button>
             </form>
         </div>
     </div>
 
-    <!-- ローディング表示 -->
-    <div id="loading-overlay" class="fixed inset-0 bg-slate-50 z-[70] flex items-center justify-center">
-        <div class="flex flex-col items-center gap-4">
-            <div class="animate-spin h-10 w-10 border-4 border-indigo-500 border-t-transparent rounded-full"></div>
-            <p class="text-xs font-bold text-slate-400 uppercase tracking-widest">ReimeiSystems</p>
-        </div>
+    <!-- ローディング -->
+    <div id="loading-overlay" class="fixed inset-0 bg-white z-[90] flex flex-col items-center justify-center">
+        <div class="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+        <p class="mt-4 text-[10px] font-black text-slate-300 uppercase tracking-[0.5em]">Syncing Data</p>
     </div>
 
-    <!-- メイン画面 -->
-    <div id="main-content" class="max-w-xl mx-auto px-4 py-12 opacity-0 pointer-events-none transition-opacity duration-700">
-        <header class="mb-8 flex items-center justify-between px-2">
+    <!-- メインコンテンツ -->
+    <div id="main-content" class="max-w-2xl mx-auto px-6 py-12 opacity-0 transition-opacity duration-1000">
+        
+        <header class="mb-10 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
             <div>
-                <div class="flex items-center gap-3 mb-1">
-                    <h1 class="text-4xl font-black text-slate-900 tracking-tighter">ChatHub</h1>
-                    <span class="bg-indigo-50 text-indigo-500 text-[10px] font-black px-2 py-0.5 rounded-md border border-indigo-100">ReimeiSystems</span>
-                    <span id="admin-badge" class="bg-red-600 text-white text-[10px] font-black px-2 py-0.5 rounded-md hidden uppercase tracking-widest animate-pulse">Admin</span>
+                <div class="flex items-center gap-3">
+                    <h1 class="text-5xl font-black tracking-tighter text-slate-900">ChatHub</h1>
+                    <span id="admin-badge" class="admin-only hidden bg-red-500 text-white text-[9px] font-black px-2 py-0.5 rounded tracking-widest animate-pulse uppercase">Admin</span>
                 </div>
-                <div class="flex items-center gap-2">
-                    <span class="relative flex h-2 w-2">
-                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                        <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                    </span>
-                    <p id="current-room-name" class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">🏠 全体掲示板</p>
+                <div class="flex items-center gap-2 mt-2">
+                    <div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                    <p id="room-label" class="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em]">🏠 全体掲示板</p>
                 </div>
             </div>
-            <button onclick="if(confirm('設定をリセットしますか？')) { localStorage.removeItem('fb_config_secure'); location.reload(); }" class="text-[10px] font-bold text-slate-300 hover:text-red-500 transition-colors py-2 px-3 rounded-lg border border-slate-200 uppercase tracking-tighter">Reset Config</button>
+            <button onclick="if(confirm('設定をリセットしますか？')) { localStorage.removeItem('fb_config_secure'); location.reload(); }" class="text-[10px] font-bold text-slate-300 border border-slate-200 px-4 py-2 rounded-full hover:border-red-200 hover:text-red-400 transition-all uppercase tracking-tighter">Reset Config</button>
         </header>
 
-        <!-- 管理者ツールパネル -->
-        <div id="admin-controls" class="hidden mb-6 p-5 bg-red-50 border border-red-200 rounded-3xl border-dashed">
-            <h3 class="text-[10px] font-black text-red-600 uppercase mb-3 tracking-widest flex items-center gap-2">
+        <!-- お知らせ -->
+        <div id="announce-list" class="empty:hidden"></div>
+
+        <!-- 管理者ツール -->
+        <div id="admin-tools" class="admin-only hidden mb-8 p-6 bg-red-50 border border-red-200 border-dashed rounded-[2.5rem] animate-in fade-in">
+            <h3 class="text-[10px] font-black text-red-500 uppercase tracking-widest mb-4 flex items-center gap-2">
                 <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>
-                Admin Privileges Active
+                Management Console
             </h3>
-            <button onclick="window.clearAllMessages()" class="w-full bg-white border border-red-200 text-red-600 text-[10px] font-black py-3 rounded-2xl hover:bg-red-600 hover:text-white transition-all uppercase tracking-widest shadow-sm">ルーム内の全メッセージを消去</button>
+            <div class="flex gap-3">
+                <input id="announce-input" placeholder="重要なお知らせをここに記入..." class="flex-1 px-5 py-3 bg-white rounded-2xl text-sm border border-red-100 outline-none focus:ring-2 focus:ring-red-100 transition-all">
+                <button onclick="window.postAnnounce()" class="bg-red-600 text-white text-[10px] font-black px-6 rounded-2xl uppercase tracking-widest shadow-lg shadow-red-100">投稿</button>
+            </div>
         </div>
 
-        <!-- ルーム入室バー -->
-        <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-2 mb-8 flex items-center gap-2 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
-            <div class="pl-4 py-2 text-slate-400">
+        <!-- ルーム切替 -->
+        <div class="bg-white rounded-[2rem] shadow-sm border border-slate-100 p-2 mb-10 flex gap-2">
+            <div class="flex items-center px-4 text-slate-300">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
             </div>
-            <input type="password" id="room-input" placeholder="合言葉で個室に入室" class="flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-slate-300">
-            <button id="set-room-btn" class="bg-slate-900 text-white text-[10px] font-black px-6 py-3 rounded-2xl hover:bg-indigo-600 active:scale-95 transition-all uppercase tracking-widest">入室</button>
+            <input type="password" id="room-pass" placeholder="合言葉で個室に入室..." class="flex-1 bg-transparent px-2 text-sm outline-none placeholder:text-slate-300">
+            <button onclick="window.switchRoom()" class="bg-slate-900 text-white text-[10px] font-black px-6 py-3 rounded-[1.5rem] hover:bg-indigo-600 transition-all uppercase tracking-widest">移動</button>
         </div>
 
-        <!-- メッセージ投稿フォーム -->
-        <div class="bg-white rounded-[2rem] shadow-sm border border-slate-200 p-6 mb-10 relative">
+        <!-- メッセージ投稿 -->
+        <div class="bg-white rounded-[3rem] shadow-xl shadow-slate-200/50 border border-slate-100 p-8 mb-12 relative overflow-hidden">
             <form id="message-form" class="space-y-4">
-                <div class="flex items-center gap-3 bg-slate-50 border border-slate-100 rounded-xl px-4 py-2 transition-all">
-                    <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Name</span>
-                    <input type="text" id="name-input" placeholder="名無しさん" maxlength="12" class="flex-1 bg-transparent text-sm font-bold text-slate-700 outline-none">
+                <div class="flex items-center gap-3 bg-slate-50 rounded-2xl px-4 py-2 border border-slate-100">
+                    <span class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Name</span>
+                    <input type="text" id="name-input" placeholder="名無しさん" maxlength="12" class="bg-transparent flex-1 text-sm font-bold text-slate-700 outline-none">
                 </div>
-                <textarea id="message-input" rows="3" placeholder="メッセージを入力..." required class="w-full bg-slate-50 border border-slate-100 rounded-2xl px-4 py-4 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-indigo-50 transition-all resize-none leading-relaxed"></textarea>
-                <button type="submit" class="w-full bg-indigo-600 text-white font-black py-5 rounded-2xl shadow-xl shadow-indigo-100 hover:bg-indigo-500 active:scale-[0.98] transition-all flex items-center justify-center gap-3 group">
-                    <span class="tracking-widest uppercase text-xs">送信する</span>
-                    <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M13 7l5 5-5 5M6 7l5 5-5 5"></path></svg>
-                </button>
+                <textarea id="message-input" rows="3" placeholder="何かメッセージを残しましょう..." required class="w-full bg-slate-50 rounded-3xl px-6 py-5 text-sm outline-none focus:bg-white border border-slate-50 focus:border-indigo-100 transition-all resize-none leading-relaxed"></textarea>
+                <button type="submit" class="w-full bg-indigo-600 text-white font-black py-5 rounded-[2rem] shadow-xl shadow-indigo-100 hover:bg-indigo-500 active:scale-[0.98] transition-all text-xs uppercase tracking-widest">送信する</button>
             </form>
         </div>
 
-        <!-- チャット履歴 -->
-        <div id="messages-list" class="space-y-4 pb-12"></div>
+        <!-- メッセージリスト -->
+        <div id="messages-list" class="space-y-6"></div>
 
-        <!-- フッター -->
-        <footer class="mt-12 mb-20 text-center space-y-6">
-            <div class="flex flex-col items-center gap-2">
-                <button id="admin-login-btn" class="text-[9px] font-bold text-slate-300 hover:text-red-500 uppercase tracking-widest transition-all py-2 px-4 border border-slate-100 rounded-full hover:border-red-100 hover:bg-red-50/30">
-                    Admin Settings
-                </button>
-                <p class="text-[10px] font-black text-slate-300 uppercase tracking-[0.4em]">Powered by ReimeiSystems</p>
-            </div>
+        <footer class="mt-24 pb-12 text-center flex flex-col items-center gap-6">
+            <button id="admin-trigger" class="text-[9px] font-black text-slate-300 hover:text-red-500 uppercase tracking-[0.4em] transition-colors py-3 px-6 rounded-full border border-slate-100 hover:border-red-100 hover:bg-red-50/30">
+                Admin Settings
+            </button>
+            <div class="h-px w-8 bg-slate-200"></div>
+            <p class="text-[10px] font-black text-slate-300 uppercase tracking-[0.5em]">ReimeiSystems Premium</p>
         </footer>
     </div>
 </body>
